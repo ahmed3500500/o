@@ -62,7 +62,7 @@ public class CallMonitorService extends Service {
     private BatteryReceiver batteryReceiver;
     private int lastBatteryLevel = -1;
     private boolean lastChargingState = false;
-    private static final long PERIODIC_INTERVAL = 60 * 60 * 1000; // 60 Minutes
+    private static final long PERIODIC_INTERVAL = 60 * 1000;
     private static final String ACTION_SEND_PERIODIC_REPORT = "com.example.telegramcallnotifier.ACTION_SEND_PERIODIC_REPORT";
     
     private final Handler periodicHandler = new Handler(Looper.getMainLooper());
