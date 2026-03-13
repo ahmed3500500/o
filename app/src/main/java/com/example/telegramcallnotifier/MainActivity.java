@@ -33,6 +33,7 @@ public class MainActivity extends AppCompatActivity {
     
     private TelegramSender telegramSender;
     private Button btnToggleService;
+    private Button btnViewLogs;
     private TextView textStatus;
     private CustomExceptionHandler exceptionHandler;
 
@@ -49,6 +50,7 @@ public class MainActivity extends AppCompatActivity {
         telegramSender = new TelegramSender(this);
 
         btnToggleService = findViewById(R.id.btnToggleService);
+        btnViewLogs = findViewById(R.id.btnViewLogs);
         textStatus = findViewById(R.id.textStatus);
 
         btnToggleService.setOnClickListener(new View.OnClickListener() {
@@ -59,6 +61,13 @@ public class MainActivity extends AppCompatActivity {
                 } else {
                     checkPermissionsAndStartService();
                 }
+            }
+        });
+
+        btnViewLogs.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showLogs();
             }
         });
 
@@ -86,6 +95,11 @@ public class MainActivity extends AppCompatActivity {
             btnToggleService.setBackgroundTintList(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#F44336"))); // Red
             textStatus.setText("Status: Service Stopped");
         }
+    }
+
+    private void showLogs() {
+        String logs = CustomExceptionHandler.getLogContent(this);
+        textStatus.setText(logs);
     }
 
     private boolean isServiceRunning() {

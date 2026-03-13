@@ -27,6 +27,13 @@
         android:backgroundTint="#F44336"
         android:layout_marginBottom="32dp"/>
 
+    <Button
+        android:id="@+id/btnViewLogs"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="View Logs"
+        android:layout_marginBottom="24dp"/>
+
     <TextView
         android:id="@+id/textStatus"
         android:layout_width="wrap_content"

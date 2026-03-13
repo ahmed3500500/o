@@ -27,24 +27,30 @@ public class TelegramSender {
     }
 
     public void sendMessage(String message) {
+        CustomExceptionHandler.log(context, "CALL sendMessage() called. msg=" + truncate(message, 500));
         sendToServer("call", message);
     }
     
     public void sendStatusMessage(String message) {
+        CustomExceptionHandler.log(context, "REPORT sendStatusMessage() called. msg=" + truncate(message, 500));
         sendToServer("report", message);
     }
 
     public void sendToServer(String type, String text) {
-        if (text == null || text.isEmpty()) return;
+        if (text == null || text.isEmpty()) {
+            CustomExceptionHandler.log(context, "sendToServer skipped: empty text. type=" + type);
+            return;
+        }
         final String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
         final String finalText = text;
 
-        CustomExceptionHandler.log(context, "Server Sending type=" + finalType + " len=" + finalText.length());
+        CustomExceptionHandler.log(context, "sendToServer start. type=" + finalType + " text=" + truncate(finalText, 500));
 
         executor.execute(() -> {
             HttpURLConnection conn = null;
             try {
                 URL url = new URL(SERVER_URL);
+                CustomExceptionHandler.log(context, "Opening connection to " + SERVER_URL);
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
                 conn.setConnectTimeout(20000);
@@ -58,6 +64,7 @@ public class TelegramSender {
                         + "\"text\":\"" + escapeJson(finalText) + "\""
                         + "}";
 
+                CustomExceptionHandler.log(context, "JSON payload ready. len=" + json.length());
                 byte[] payload = json.getBytes(StandardCharsets.UTF_8);
                 conn.setFixedLengthStreamingMode(payload.length);
 
@@ -69,16 +76,16 @@ public class TelegramSender {
                 int responseCode = conn.getResponseCode();
                 String responseBody = readBody(conn, responseCode >= 200 && responseCode < 300);
 
+                CustomExceptionHandler.log(context, "Server response code=" + responseCode);
                 if (responseCode >= 200 && responseCode < 300) {
                     Log.d(TAG, "Server OK: " + responseCode);
                 } else {
                     Log.e(TAG, "Server failed: " + responseCode);
                 }
 
-                if (responseBody != null && !responseBody.isEmpty()) {
-                    CustomExceptionHandler.log(context, "Server response " + responseCode + ": " + truncate(responseBody, 2000));
-                }
+                CustomExceptionHandler.log(context, "Server response body=" + truncate(responseBody, 2000));
             } catch (Exception e) {
+                CustomExceptionHandler.log(context, "sendToServer exception: " + e.getClass().getSimpleName() + " - " + e.getMessage());
                 Log.e(TAG, "Error sending to server", e);
                 CustomExceptionHandler.logError(context, e);
             } finally {
