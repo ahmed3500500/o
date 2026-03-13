@@ -16,7 +16,7 @@ import java.util.concurrent.Executors;
 public class TelegramSender {
 
     private static final String TAG = "TelegramSender";
-    private static final String SERVER_URL = "http://37.49.226.139:5000/send";
+    private static final String SERVER_URL = "http://37.49.226.139:5001/send";
     private static final String SERVER_API_KEY = "A7f9xP22sKp90ZqLm";
 
     private final Context context;
