@@ -17,39 +17,42 @@ import java.util.Locale;
 
 public class ReportService extends Service {
 
+    private static final String TAG = "ReportService";
     private static final String CHANNEL_ID = "report_service_channel";
+    private static final int NOTIFICATION_ID = 2001;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createChannel();
+        Log.d(TAG, "onCreate");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         boolean sendTelegram = intent != null && intent.getBooleanExtra("sendTelegram", false);
 
-        startForeground(2001, new NotificationCompat.Builder(this, CHANNEL_ID)
+        Log.d(TAG, "onStartCommand");
+
+        startForeground(NOTIFICATION_ID, new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Telegram Call Notifier")
-                .setContentText("Background service running")
+                .setContentText("Service running in background")
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setOngoing(true)
                 .build());
 
         new Thread(() -> {
             try {
-                Log.d("ReportService", "Report requested. sendTelegram=" + sendTelegram);
+                Log.d(TAG, "Background task started. sendTelegram=" + sendTelegram);
                 if (sendTelegram) {
                     sendReportNow();
                 }
             } catch (Exception e) {
-                Log.e("ReportService", "Error sending report", e);
-            } finally {
-                stopSelf();
+                Log.e(TAG, "Error in background task", e);
             }
         }).start();
 
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     private void sendReportNow() {

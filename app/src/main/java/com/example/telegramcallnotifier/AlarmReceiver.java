@@ -45,7 +45,7 @@ public class AlarmReceiver extends BroadcastReceiver {
             context.startActivity(wakeIntent);
 
             Intent serviceIntent = new Intent(context, ReportService.class);
-            serviceIntent.setAction("SEND_REPORT_NOW");
+            serviceIntent.setAction("ALARM_TRIGGER");
             serviceIntent.putExtra("sendTelegram", sendTelegram);
 
             try {
@@ -55,10 +55,7 @@ public class AlarmReceiver extends BroadcastReceiver {
                     context.startService(serviceIntent);
                 }
             } catch (Exception e) {
-                try {
-                    context.startService(serviceIntent);
-                } catch (Exception ignored) {
-                }
+                Log.e("AlarmReceiver", "Failed to start ReportService", e);
             }
 
         } catch (Exception e) {

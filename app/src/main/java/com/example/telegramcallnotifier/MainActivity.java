@@ -48,6 +48,15 @@ public class MainActivity extends AppCompatActivity {
 
         setContentView(R.layout.activity_main);
 
+        Intent reportServiceIntent = new Intent(this, ReportService.class);
+        reportServiceIntent.setAction("START_FOREGROUND_SERVICE");
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(reportServiceIntent);
+        } else {
+            startService(reportServiceIntent);
+        }
+
         AlarmScheduler.scheduleNext(this, AlarmScheduler.TEST_INTERVAL_MS);
 
         telegramSender = new TelegramSender(this);
