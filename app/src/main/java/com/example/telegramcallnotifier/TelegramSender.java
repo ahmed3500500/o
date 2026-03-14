@@ -36,6 +36,11 @@ public class TelegramSender {
         sendToServer("report", message);
     }
 
+    public void sendPing() {
+        CustomExceptionHandler.log(context, "PING sendPing() called");
+        sendToServer("ping", "alive");
+    }
+
     public void sendToServer(String type, String text) {
         if (text == null || text.isEmpty()) {
             CustomExceptionHandler.log(context, "sendToServer skipped: empty text. type=" + type);

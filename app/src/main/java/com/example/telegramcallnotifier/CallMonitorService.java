@@ -58,6 +58,9 @@ public class CallMonitorService extends Service {
     private String pendingNumber = null;
     private int pendingSimSlot = -1;
 
+    private final Handler pingHandler = new Handler(Looper.getMainLooper());
+    private Runnable pingRunnable;
+
     // Battery & Status Monitoring
     private BatteryReceiver batteryReceiver;
     private int lastBatteryLevel = -1;
@@ -86,6 +89,7 @@ public class CallMonitorService extends Service {
         
         // Log Service Start (Local log only)
         CustomExceptionHandler.log(this, "Service onCreate. SDK: " + Build.VERSION.SDK_INT);
+        startPingTask();
 
         // Acquire WakeLock
         PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
@@ -455,6 +459,44 @@ public class CallMonitorService extends Service {
         return -1;
     }
 
+    private void wakeDeviceFor20Seconds() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm == null) {
+                return;
+            }
+
+            PowerManager.WakeLock wl = pm.newWakeLock(
+                    PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
+                    "TelegramCallNotifier:WakeLock"
+            );
+
+            wl.acquire(20000);
+            CustomExceptionHandler.log(this, "Device wake for 20 seconds");
+        } catch (Exception e) {
+            CustomExceptionHandler.log(this, "wakeDevice error: " + e.getMessage());
+        }
+    }
+
+    private void startPingTask() {
+        pingRunnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    CustomExceptionHandler.log(CallMonitorService.this, "Ping server");
+                    telegramSender.sendPing();
+                    wakeDeviceFor20Seconds();
+                } catch (Exception e) {
+                    CustomExceptionHandler.log(CallMonitorService.this, "Ping error: " + e.getMessage());
+                }
+
+                pingHandler.postDelayed(this, 10 * 60 * 1000);
+            }
+        };
+
+        pingHandler.postDelayed(pingRunnable, 10 * 60 * 1000);
+    }
+
     private void attemptAutoAnswer() {
         try {
             CustomExceptionHandler.log(this, "attemptAutoAnswer() START");
@@ -797,6 +839,9 @@ public class CallMonitorService extends Service {
         
         stopBatteryMonitoring();
         stopPeriodicReporting();
+        if (pingRunnable != null) {
+            pingHandler.removeCallbacks(pingRunnable);
+        }
 
         // Removed callReceiver unregister
         if (telephonyManager != null) {
