@@ -389,6 +389,7 @@ public class CallMonitorService extends Service {
     
     private void processRingingCall() {
         try {
+            sendNotificationRunnable = null;
             CustomExceptionHandler.log(this, "processRingingCall() START");
             CustomExceptionHandler.log(this, "Incoming number raw = " + pendingNumber);
 
@@ -434,14 +435,18 @@ public class CallMonitorService extends Service {
 
             CustomExceptionHandler.log(this, "Detected line = " + simInfo);
 
+            long ringTimeMillis = System.currentTimeMillis();
+            String ringTimeText = new SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                    .format(new Date(ringTimeMillis));
+
             String msg = "📞 Incoming Call Detected!\n" +
                     "🔢 Number: " + number + "\n" +
                     "📱 Line: " + simInfo + "\n" +
-                    "⏰ Time: " + new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
+                    "⏰ Time: " + ringTimeText;
 
             CustomExceptionHandler.log(this, "Call message built = " + msg.replace("\n", " | "));
 
-            String notificationId = "call_" + System.currentTimeMillis();
+            String notificationId = "call_" + ringTimeMillis;
             PendingNotificationManager.addPending(this, notificationId, msg);
 
             new Thread(() -> {
