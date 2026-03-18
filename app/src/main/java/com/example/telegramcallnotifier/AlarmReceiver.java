@@ -9,8 +9,8 @@ import android.os.PowerManager;
 
 public class AlarmReceiver extends BroadcastReceiver {
 
-    private static final int TELEGRAM_REPORT_EVERY_N_ALARMS = 30;
     private static final long MIN_DUPLICATE_GAP_MS = 3000L;
+    private static final long PERIODIC_STATUS_INTERVAL_MS = 60 * 60 * 1000L;
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -29,20 +29,15 @@ public class AlarmReceiver extends BroadcastReceiver {
 
         prefs.edit().putLong("last_alarm_handled_at", now).apply();
 
-        int alarmCounter = prefs.getInt("alarm_counter", 0);
-        DebugLogger.log(context, "AlarmReceiver", "alarmCounter(before)=" + alarmCounter);
+        long lastPeriodicSentAt = prefs.getLong("last_periodic_sent_at", 0L);
 
-        alarmCounter++;
-
-        boolean sendTelegram = false;
-
-        if (alarmCounter >= TELEGRAM_REPORT_EVERY_N_ALARMS) {
-            sendTelegram = true;
-            alarmCounter = 0;
+        String reportType = "alarm";
+        if ((now - lastPeriodicSentAt) >= PERIODIC_STATUS_INTERVAL_MS) {
+            reportType = "periodic_status";
+            prefs.edit().putLong("last_periodic_sent_at", now).apply();
         }
 
-        prefs.edit().putInt("alarm_counter", alarmCounter).apply();
-        DebugLogger.log(context, "AlarmReceiver", "alarmCounter(after)=" + alarmCounter + " sendTelegram=" + sendTelegram);
+        DebugLogger.log(context, "AlarmReceiver", "reportType=" + reportType);
 
         PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         PowerManager.WakeLock wakeLock = null;
@@ -67,18 +62,34 @@ public class AlarmReceiver extends BroadcastReceiver {
 
             Intent serviceIntent = new Intent(context, ReportService.class);
             serviceIntent.setAction("ALARM_TRIGGER");
-            serviceIntent.putExtra("sendTelegram", sendTelegram);
+            serviceIntent.putExtra("reportType", reportType);
 
-            try {
-                DebugLogger.log(context, "AlarmReceiver", "Starting ReportService sendTelegram=" + sendTelegram);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent);
-                } else {
-                    context.startService(serviceIntent);
+            if ("periodic_status".equals(reportType)) {
+                DebugLogger.log(context, "AlarmReceiver", "Periodic report detected, delaying ReportService start by 3 seconds");
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            context.startForegroundService(serviceIntent);
+                        } else {
+                            context.startService(serviceIntent);
+                        }
+                        DebugLogger.log(context, "AlarmReceiver", "Delayed ReportService start requested for periodic report");
+                    } catch (Exception e) {
+                        DebugLogger.logError(context, "AlarmReceiver", e);
+                    }
+                }, 10000);
+            } else {
+                try {
+                    DebugLogger.log(context, "AlarmReceiver", "Starting ReportService for alarm report");
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(serviceIntent);
+                    } else {
+                        context.startService(serviceIntent);
+                    }
+                    DebugLogger.log(context, "AlarmReceiver", "ReportService start requested successfully");
+                } catch (Exception e) {
+                    DebugLogger.logError(context, "AlarmReceiver", e);
                 }
-                DebugLogger.log(context, "AlarmReceiver", "ReportService start requested successfully");
-            } catch (Exception e) {
-                DebugLogger.logError(context, "AlarmReceiver", e);
             }
 
         } catch (Exception e) {

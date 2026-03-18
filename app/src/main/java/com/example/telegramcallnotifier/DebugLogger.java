@@ -3,9 +3,12 @@ package com.example.telegramcallnotifier;
 import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Environment;
@@ -139,6 +142,115 @@ public class DebugLogger {
                             " appPkg=" + context.getPackageName());
         } catch (Exception e) {
             logError(context, tag, e);
+        }
+    }
+
+    public static int getBatteryPercent(Context context) {
+        try {
+            BatteryManager bm = (BatteryManager) context.getSystemService(Context.BATTERY_SERVICE);
+            if (bm != null) {
+                int pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                if (pct >= 0) {
+                    return pct;
+                }
+            }
+
+            Intent batteryIntent = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (batteryIntent == null) {
+                return 0;
+            }
+            int level = batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+            int scale = batteryIntent.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+            if (level <= 0 || scale <= 0) {
+                return 0;
+            }
+            return Math.round((level * 100f) / scale);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    public static boolean isCharging(Context context) {
+        try {
+            Intent batteryIntent = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (batteryIntent == null) {
+                return false;
+            }
+            int status = batteryIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+            return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static String getNetworkSummary(Context context) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                return "unknown";
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network network = cm.getActiveNetwork();
+                if (network == null) {
+                    return "NO_ACTIVE_NETWORK";
+                }
+                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                if (caps == null) {
+                    return "NO_CAPABILITIES";
+                }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    return "WIFI";
+                }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                    return "MOBILE";
+                }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                    return "ETHERNET";
+                }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) {
+                    return "BLUETOOTH";
+                }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    return "VPN";
+                }
+                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    return "ONLINE";
+                }
+                return "OTHER";
+            } else {
+                android.net.NetworkInfo info = cm.getActiveNetworkInfo();
+                if (info != null && info.isConnected()) {
+                    return info.getTypeName();
+                }
+                return "OFFLINE";
+            }
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    public static boolean isWifiEnabled(Context context) {
+        try {
+            WifiManager wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            return wifiManager != null && wifiManager.isWifiEnabled();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static boolean isInteractive(Context context) {
+        try {
+            PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            if (pm == null) {
+                return false;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+                return pm.isInteractive();
+            } else {
+                return pm.isScreenOn();
+            }
+        } catch (Exception e) {
+            return false;
         }
     }
 
