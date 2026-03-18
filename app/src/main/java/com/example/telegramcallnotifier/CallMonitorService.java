@@ -404,6 +404,7 @@ public class CallMonitorService extends Service {
     
     private void sendGuaranteedMessage(String type, String text) {
         try {
+            triggerFullWake(type);
             String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
             String id = finalType + "_" + System.currentTimeMillis();
 
@@ -605,18 +606,49 @@ public class CallMonitorService extends Service {
         return -1;
     }
 
-    private void wakeDeviceFor20Seconds() {
+    private void triggerFullWake(String reason) {
+        CustomExceptionHandler.log(this, "triggerFullWake reason: " + reason);
         try {
             PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            PowerManager.WakeLock wakeLock = pm.newWakeLock(
-                    PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
-                    "TelegramCallNotifier:WakeLock"
-            );
-
-            wakeLock.acquire(20000);
-            CustomExceptionHandler.log(this, "Device wake for 20 seconds");
+            if (pm != null) {
+                PowerManager.WakeLock wakeLock = pm.newWakeLock(
+                        PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
+                        "TelegramCallNotifier:SystemWake"
+                );
+                wakeLock.acquire(20000);
+            }
         } catch (Exception e) {
-            CustomExceptionHandler.log(this, "wakeDevice error: " + e.getMessage());
+            CustomExceptionHandler.log(this, "WakeLock error: " + e.getMessage());
+        }
+
+        try {
+            Intent fullScreenIntent = new Intent(this, WakeActivity.class);
+            fullScreenIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            
+            int pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent fullScreenPendingIntent = PendingIntent.getActivity(this, 0,
+                    fullScreenIntent, pendingFlags);
+
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID + "_High")
+                    .setSmallIcon(android.R.drawable.ic_menu_call)
+                    .setContentTitle("System Wake (" + reason + ")")
+                    .setContentText("Waking up system for transmission")
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
+                    .setFullScreenIntent(fullScreenPendingIntent, true)
+                    .setAutoCancel(true);
+
+            NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (notificationManager != null) {
+                notificationManager.notify(1001, builder.build());
+            }
+            
+            startActivity(fullScreenIntent);
+        } catch (Exception e) {
+            CustomExceptionHandler.log(this, "FSI error: " + e.getMessage());
         }
     }
 
@@ -626,6 +658,7 @@ public class CallMonitorService extends Service {
             public void run() {
                 try {
                     CustomExceptionHandler.log(CallMonitorService.this, "Ping server");
+                    triggerFullWake("Ping");
                     telegramSender.sendPing();
                     retryPendingNotifications();
                 } catch (Exception e) {
@@ -901,9 +934,18 @@ public class CallMonitorService extends Service {
                     "Call Monitor Service Channel",
                     NotificationManager.IMPORTANCE_DEFAULT
             );
+            
+            NotificationChannel highChannel = new NotificationChannel(
+                    CHANNEL_ID + "_High",
+                    "High Priority Alerts",
+                    NotificationManager.IMPORTANCE_HIGH
+            );
+            highChannel.setBypassDnd(true);
+            
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
                 manager.createNotificationChannel(serviceChannel);
+                manager.createNotificationChannel(highChannel);
             }
         }
     }
