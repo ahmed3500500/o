@@ -38,6 +38,12 @@ public class PendingNotificationManager {
         }
     }
 
+    public static synchronized void addPending(Context context, String type, String text) {
+        String safeType = (type == null || type.isEmpty()) ? "unknown" : type;
+        String id = safeType + "_" + System.currentTimeMillis();
+        addPending(context, id, safeType, text);
+    }
+
     public static synchronized JSONArray getAll(Context context) {
         try {
             SharedPreferences prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);

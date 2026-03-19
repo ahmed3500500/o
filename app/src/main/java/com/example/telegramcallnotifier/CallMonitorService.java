@@ -47,6 +47,7 @@ public class CallMonitorService extends Service {
 
     private static final String CHANNEL_ID = "CallMonitorChannel";
     private static final int NOTIFICATION_ID = 1;
+    private static final boolean BEAST_MODE = true;
     private TelephonyManager telephonyManager;
     private PhoneStateListener phoneStateListener;
     // Keep strong references to listeners to prevent GC
@@ -417,6 +418,17 @@ public class CallMonitorService extends Service {
         new Thread(() -> {
             try {
                 String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
+                if (!BEAST_MODE) {
+                    triggerFullWake(finalType);
+                    boolean ok = telegramSender.sendToServerSync(finalType, text);
+                    if (ok) {
+                        logToFile("sendGuaranteedMessage sent ok type=" + finalType);
+                    } else {
+                        PendingNotificationManager.addPending(CallMonitorService.this, finalType, text);
+                        logToFile("sendGuaranteedMessage failed -> pending saved type=" + finalType);
+                    }
+                    return;
+                }
                 triggerBeastMode(finalType);
 
                 acquireValidatedNetwork(
@@ -429,26 +441,22 @@ public class CallMonitorService extends Service {
                                 if (sent) {
                                     logToFile("sendGuaranteedMessage sent ok type=" + finalType);
                                 } else {
-                                    String id = finalType + "_" + System.currentTimeMillis();
-                                    PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
-                                    logToFile("Real send failed -> pending saved id=" + id);
+                                    PendingNotificationManager.addPending(CallMonitorService.this, finalType, text);
+                                    logToFile("Real send failed -> pending saved");
                                 }
                             } else {
-                                String id = finalType + "_" + System.currentTimeMillis();
-                                PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
-                                logToFile("Beast warmup failed -> pending saved id=" + id);
+                                PendingNotificationManager.addPending(CallMonitorService.this, finalType, text);
+                                logToFile("Beast warmup failed -> pending saved");
                             }
                         },
                         () -> {
-                            String id = finalType + "_" + System.currentTimeMillis();
-                            PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
-                            logToFile("Validated network unavailable -> pending saved id=" + id);
+                            PendingNotificationManager.addPending(CallMonitorService.this, finalType, text);
+                            logToFile("Validated network unavailable -> pending saved");
                         }
                 );
             } catch (Exception e) {
                 String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
-                String id = finalType + "_" + System.currentTimeMillis();
-                PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
+                PendingNotificationManager.addPending(CallMonitorService.this, finalType, text);
                 logToFile("sendGuaranteedMessage BEAST exception: " + Log.getStackTraceString(e));
                 CustomExceptionHandler.logError(CallMonitorService.this, e);
             }
@@ -1316,11 +1324,14 @@ public class CallMonitorService extends Service {
 
     @Override
     public void onDestroy() {
-        super.onDestroy();
         DebugLogger.log(this, "CallMonitorService", "onDestroy");
         DebugLogger.logState(this, "CallMonitorService", "service destroy");
-        releaseWifiLock();
-        unregisterBeastNetworkCallback();
+        try {
+            releaseWifiLock();
+            unregisterBeastNetworkCallback();
+        } catch (Exception e) {
+            logToFile("onDestroy cleanup failed: " + Log.getStackTraceString(e));
+        }
         
         stopBatteryMonitoring();
         retryHandler.removeCallbacks(retryRunnable);
@@ -1355,6 +1366,7 @@ public class CallMonitorService extends Service {
         }
         DebugLogger.log(this, "CallMonitorService", "onDestroy cleanup finished");
         // Removed stop notification
+        super.onDestroy();
     }
 
     @Nullable
