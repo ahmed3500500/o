@@ -13,11 +13,17 @@ public class PendingNotificationManager {
     public static synchronized void addPending(Context context, String id, String type, String text) {
         try {
             JSONArray arr = getAll(context);
+            String safeType = (type == null) ? "" : type;
+            String safeText = (text == null) ? "" : text;
+            if (isDuplicatePending(arr, safeType, safeText)) {
+                CustomExceptionHandler.log(context, "Duplicate pending ignored: type=" + safeType);
+                return;
+            }
 
             JSONObject obj = new JSONObject();
             obj.put("id", id);
-            obj.put("type", type);
-            obj.put("text", text);
+            obj.put("type", safeType);
+            obj.put("text", safeText);
             obj.put("createdAt", System.currentTimeMillis());
             obj.put("retryCount", 0);
             obj.put("lastTry", System.currentTimeMillis());
@@ -25,7 +31,7 @@ public class PendingNotificationManager {
             arr.put(obj);
             saveAll(context, arr);
 
-            CustomExceptionHandler.log(context, "Pending added: " + id + " type=" + type);
+            CustomExceptionHandler.log(context, "Pending added: " + id + " type=" + safeType);
         } catch (Exception e) {
             CustomExceptionHandler.log(context, "addPending error: " + e.getMessage());
             CustomExceptionHandler.logError(context, e);
@@ -87,5 +93,17 @@ public class PendingNotificationManager {
     private static synchronized void saveAll(Context context, JSONArray arr) {
         SharedPreferences prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
         prefs.edit().putString(KEY_ITEMS, arr.toString()).apply();
+    }
+
+    private static boolean isDuplicatePending(JSONArray arr, String type, String text) {
+        if (arr == null) return false;
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject obj = arr.optJSONObject(i);
+            if (obj == null) continue;
+            String t = obj.optString("type", "");
+            String x = obj.optString("text", "");
+            if (type.equals(t) && text.equals(x)) return true;
+        }
+        return false;
     }
 }

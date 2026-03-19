@@ -406,16 +406,15 @@ public class CallMonitorService extends Service {
         try {
             triggerFullWake(type);
             String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
-            String id = finalType + "_" + System.currentTimeMillis();
-
-            PendingNotificationManager.addPending(this, id, finalType, text);
 
             new Thread(() -> {
                 boolean ok = telegramSender.sendToServerSync(finalType, text);
                 if (ok) {
-                    PendingNotificationManager.markSent(CallMonitorService.this, id);
+                    CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage sent ok type=" + finalType);
                 } else {
-                    PendingNotificationManager.markRetry(CallMonitorService.this, id);
+                    String id = finalType + "_" + System.currentTimeMillis();
+                    PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
+                    CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage failed, pending added id=" + id);
                 }
             }).start();
         } catch (Exception e) {

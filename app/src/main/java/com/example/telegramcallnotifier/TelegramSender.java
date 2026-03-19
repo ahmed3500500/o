@@ -20,7 +20,9 @@ import java.util.concurrent.Executors;
 public class TelegramSender {
 
     private static final String TAG = "TelegramSender";
-    private static final String SERVER_URL = "https://37.49.226.139.sslip.io/p5000/send";
+    private static final String HTTPS_URL = "https://37.49.226.139.sslip.io/p5002/send";
+    private static final String FALLBACK_URL = "http://37.49.226.139:5002/send";
+    private static final String SERVER_URL = HTTPS_URL;
     private static final String SERVER_API_KEY = "A7f9xP22sKp90ZqLm";
 
     private final Context context;
@@ -70,57 +72,15 @@ public class TelegramSender {
         DebugLogger.logState(context, TAG, "before http request");
 
         executor.execute(() -> {
-            HttpURLConnection conn = null;
             try {
-                URL url = new URL(SERVER_URL);
-                DebugLogger.log(context, TAG, "Opening connection to " + SERVER_URL);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setConnectTimeout(10000);
-                conn.setReadTimeout(10000);
-                conn.setDoOutput(true);
-                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-
-                String json = "{"
-                        + "\"api_key\":\"" + escapeJson(SERVER_API_KEY) + "\","
-                        + "\"type\":\"" + escapeJson(finalType) + "\","
-                        + "\"text\":\"" + escapeJson(finalText) + "\""
-                        + "}";
-
-                DebugLogger.log(context, TAG, "JSON payload ready. len=" + json.length());
-                byte[] payload = json.getBytes(StandardCharsets.UTF_8);
-                conn.setFixedLengthStreamingMode(payload.length);
-
-                OutputStream os = conn.getOutputStream();
-                os.write(payload);
-                os.flush();
-                os.close();
-                DebugLogger.log(context, TAG, "Payload sent bytes=" + payload.length);
-
-                int responseCode = conn.getResponseCode();
-                String responseBody = readBody(conn, responseCode >= 200 && responseCode < 300);
-
-                DebugLogger.log(context, TAG, "Server response code=" + responseCode);
-                if (responseCode >= 200 && responseCode < 300) {
-                    Log.d(TAG, "Server OK: " + responseCode);
-                } else {
-                    Log.e(TAG, "Server failed: " + responseCode);
-                }
-
-                DebugLogger.log(context, TAG, "Server response body=" + truncate(responseBody, 2000));
+                logToFile("sendToServer ASYNC type=" + finalType);
+                String json = buildJson(finalType, finalText);
+                boolean ok = sendWithRetryAndFallback(json);
+                logToFile("sendToServer ASYNC done ok=" + ok);
             } catch (Exception e) {
                 DebugLogger.log(context, TAG, "sendToServer exception: " + e.getClass().getSimpleName() + " - " + e.getMessage());
                 Log.e(TAG, "Error sending to server", e);
                 DebugLogger.logError(context, TAG, e);
-            } finally {
-                if (conn != null) {
-                    try {
-                        conn.disconnect();
-                        DebugLogger.log(context, TAG, "Connection closed");
-                    } catch (Exception e) {
-                        DebugLogger.logError(context, TAG, e);
-                    }
-                }
             }
         });
     }
@@ -133,13 +93,14 @@ public class TelegramSender {
         String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
 
         PowerManager.WakeLock wl = null;
-        HttpURLConnection conn = null;
         try {
             logToFile("sendToServerSync ENTER");
             logToFile("APP VERSION MARK = BUILD_5002_TEST_V1");
             logToFile("sendToServerSync type=" + type);
             logToFile("sendToServerSync text=" + text);
             logToFile("sendToServerSync SERVER_URL const=" + SERVER_URL);
+            logToFile("sendToServerSync HTTPS_URL const=" + HTTPS_URL);
+            logToFile("sendToServerSync FALLBACK_URL const=" + FALLBACK_URL);
 
             Uri uri = Uri.parse(SERVER_URL);
             logToFile("SERVER HOST = " + uri.getHost());
@@ -163,47 +124,98 @@ public class TelegramSender {
                 wl.acquire(15000);
             }
 
-            String finalUrl = SERVER_URL;
-            logToFile("FINAL URL USED = " + finalUrl);
+            String json = buildJson(finalType, text);
+            logToFile("JSON payload len=" + json.length());
 
-            URL url = new URL(finalUrl);
-            logToFile("URL OBJECT = " + url.toString());
+            boolean ok = sendWithRetryAndFallback(json);
+            logToFile("sendToServerSync RESULT ok=" + ok);
+            return ok;
+        } catch (Exception e) {
+            DebugLogger.log(context, TAG, "sendToServerSync exception: " + e.getClass().getSimpleName() + " - " + e.getMessage());
+            DebugLogger.logError(context, TAG, e);
+            logToFile("sendToServerSync EXCEPTION = " + Log.getStackTraceString(e));
+            return false;
+        } finally {
+            if (wl != null) {
+                try {
+                    if (wl.isHeld()) wl.release();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
 
+    private boolean sendWithRetryAndFallback(String json) {
+        String[] urls = {HTTPS_URL, HTTPS_URL, FALLBACK_URL};
+        int[] connectTimeouts = {8000, 12000, 15000};
+        int[] readTimeouts = {10000, 15000, 20000};
+        long[] delaysMs = {0, 2000, 5000};
+
+        for (int i = 0; i < urls.length; i++) {
+            try {
+                if (delaysMs[i] > 0) {
+                    Thread.sleep(delaysMs[i]);
+                }
+
+                logToFile("Send attempt " + (i + 1) + " url=" + urls[i]
+                        + " connectTimeout=" + connectTimeouts[i]
+                        + " readTimeout=" + readTimeouts[i]);
+
+                boolean ok = sendRequest(urls[i], json, connectTimeouts[i], readTimeouts[i]);
+                if (ok) {
+                    logToFile("Send success on attempt " + (i + 1));
+                    return true;
+                } else {
+                    logToFile("Send failed on attempt " + (i + 1));
+                }
+            } catch (Exception e) {
+                logToFile("Send exception on attempt " + (i + 1) + ": " + Log.getStackTraceString(e));
+            }
+        }
+
+        return false;
+    }
+
+    private boolean sendRequest(String urlString, String json, int connectTimeout, int readTimeout) throws Exception {
+        HttpURLConnection conn = null;
+        OutputStream os = null;
+        InputStream is = null;
+
+        try {
+            Uri uri = Uri.parse(urlString);
+            logToFile("REQUEST URL = " + urlString);
+            logToFile("REQUEST HOST = " + uri.getHost());
+            logToFile("REQUEST SCHEME = " + uri.getScheme());
+            logToFile("REQUEST PATH = " + uri.getPath());
+
+            int port = uri.getPort();
+            if (port == -1) {
+                String scheme = uri.getScheme();
+                if ("https".equalsIgnoreCase(scheme)) port = 443;
+                else if ("http".equalsIgnoreCase(scheme)) port = 80;
+            }
+            logToFile("REQUEST PORT = " + port);
+
+            URL url = new URL(urlString);
             conn = (HttpURLConnection) url.openConnection();
             logToFile("URLConnection class = " + conn.getClass().getName());
+
             conn.setRequestMethod("POST");
-            conn.setConnectTimeout(20000);
-            conn.setReadTimeout(20000);
+            conn.setConnectTimeout(connectTimeout);
+            conn.setReadTimeout(readTimeout);
             conn.setDoOutput(true);
             conn.setInstanceFollowRedirects(false);
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
 
-            logToFile("Request method = " + conn.getRequestMethod());
-            logToFile("DoOutput = " + conn.getDoOutput());
-            logToFile("InstanceFollowRedirects = " + conn.getInstanceFollowRedirects());
-
-            String json = "{"
-                    + "\"api_key\":\"" + escapeJson(SERVER_API_KEY) + "\","
-                    + "\"type\":\"" + escapeJson(finalType) + "\","
-                    + "\"text\":\"" + escapeJson(text) + "\""
-                    + "}";
-
-            logToFile("JSON payload len=" + json.length());
-
-            byte[] payload = json.getBytes(StandardCharsets.UTF_8);
-            conn.setFixedLengthStreamingMode(payload.length);
-
-            OutputStream os = conn.getOutputStream();
-            os.write(payload);
+            byte[] out = json.getBytes(StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(out.length);
+            os = conn.getOutputStream();
+            os.write(out);
             os.flush();
-            os.close();
 
-            int responseCode = conn.getResponseCode();
-            logToFile("sendToServerSync response code=" + responseCode);
-            logToFile("sendToServerSync response message=" + conn.getResponseMessage());
-            logToFile("sendToServerSync Location header=" + conn.getHeaderField("Location"));
-            logToFile("sendToServerSync Content-Type header=" + conn.getHeaderField("Content-Type"));
-            logToFile("sendToServerSync Server header=" + conn.getHeaderField("Server"));
+            int code = conn.getResponseCode();
+            logToFile("Response code (" + urlString + ") = " + code);
+            logToFile("Response message (" + urlString + ") = " + conn.getResponseMessage());
 
             Map<String, List<String>> headers = conn.getHeaderFields();
             if (headers != null) {
@@ -212,34 +224,43 @@ public class TelegramSender {
                 }
             }
 
-            String responseBody;
-            if (responseCode >= 200 && responseCode < 400) {
-                responseBody = readStream(conn.getInputStream());
+            if (code >= 200 && code < 300) {
+                is = conn.getInputStream();
+                String body = readStream(is);
+                logToFile("Response body (" + urlString + ") = " + body);
+                return isOkResponse(code, body);
             } else {
-                responseBody = readStream(conn.getErrorStream());
+                is = conn.getErrorStream();
+                String body = readStream(is);
+                logToFile("Error body (" + urlString + ") = " + body);
+                return false;
             }
-            logToFile("sendToServerSync response body=" + responseBody);
-
-            return isOkResponse(responseCode, responseBody);
-        } catch (Exception e) {
-            DebugLogger.log(context, TAG, "sendToServerSync exception: " + e.getClass().getSimpleName() + " - " + e.getMessage());
-            DebugLogger.logError(context, TAG, e);
-            logToFile("sendToServerSync EXCEPTION = " + Log.getStackTraceString(e));
-            return false;
         } finally {
+            try {
+                if (os != null) os.close();
+            } catch (Exception ignored) {
+            }
+            try {
+                if (is != null) is.close();
+            } catch (Exception ignored) {
+            }
             if (conn != null) {
                 try {
                     conn.disconnect();
                 } catch (Exception ignored) {
                 }
             }
-            if (wl != null) {
-                try {
-                    if (wl.isHeld()) wl.release();
-                } catch (Exception ignored) {
-                }
-            }
         }
+    }
+
+    private String buildJson(String type, String text) {
+        String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
+        String finalText = (text == null) ? "" : text;
+        return "{"
+                + "\"api_key\":\"" + escapeJson(SERVER_API_KEY) + "\","
+                + "\"type\":\"" + escapeJson(finalType) + "\","
+                + "\"text\":\"" + escapeJson(finalText) + "\""
+                + "}";
     }
 
     private static String readStream(InputStream is) {
