@@ -12,7 +12,10 @@ import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.hardware.display.DisplayManager;
 import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
+import android.net.NetworkRequest;
 import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Build;
@@ -30,6 +33,10 @@ import android.view.KeyEvent;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -403,23 +410,125 @@ public class CallMonitorService extends Service {
     }
     
     private void sendGuaranteedMessage(String type, String text) {
-        try {
-            triggerFullWake(type);
-            String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
+        new Thread(() -> {
+            try {
+                String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
+                triggerFullWake(finalType);
 
-            new Thread(() -> {
-                boolean ok = telegramSender.sendToServerSync(finalType, text);
-                if (ok) {
-                    CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage sent ok type=" + finalType);
-                } else {
-                    String id = finalType + "_" + System.currentTimeMillis();
-                    PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
-                    CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage failed, pending added id=" + id);
-                }
-            }).start();
+                forceNetworkWarmup(
+                        () -> {
+                            CustomExceptionHandler.log(CallMonitorService.this, "Network READY -> sending type=" + finalType);
+                            boolean ok = telegramSender.sendToServerSync(finalType, text);
+                            if (ok) {
+                                CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage sent ok type=" + finalType);
+                            } else {
+                                String id = finalType + "_" + System.currentTimeMillis();
+                                PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
+                                CustomExceptionHandler.log(CallMonitorService.this, "Send failed -> saved pending id=" + id);
+                            }
+                        },
+                        () -> {
+                            String id = ((type == null || type.isEmpty()) ? "unknown" : type) + "_" + System.currentTimeMillis();
+                            PendingNotificationManager.addPending(CallMonitorService.this, id, (type == null || type.isEmpty()) ? "unknown" : type, text);
+                            CustomExceptionHandler.log(CallMonitorService.this, "Warmup failed -> saved pending id=" + id);
+                        }
+                );
+            } catch (Exception e) {
+                String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
+                String id = finalType + "_" + System.currentTimeMillis();
+                PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
+                CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage exception: " + Log.getStackTraceString(e));
+                CustomExceptionHandler.logError(CallMonitorService.this, e);
+            }
+        }).start();
+    }
+
+    private boolean warmupPing() {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(TelegramSender.getServerUrl());
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(20000);
+            conn.setDoOutput(true);
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+
+            String json = "{"
+                    + "\"api_key\":\"" + "A7f9xP22sKp90ZqLm" + "\","
+                    + "\"type\":\"warmup\","
+                    + "\"text\":\"wake_network\""
+                    + "}";
+
+            OutputStream os = conn.getOutputStream();
+            os.write(json.getBytes(StandardCharsets.UTF_8));
+            os.flush();
+            os.close();
+
+            int code = conn.getResponseCode();
+            CustomExceptionHandler.log(this, "warmupPing code=" + code);
+            return code == 200;
         } catch (Exception e) {
-            CustomExceptionHandler.log(this, "sendGuaranteedMessage error: " + e.getMessage());
-            CustomExceptionHandler.logError(this, e);
+            CustomExceptionHandler.log(this, "warmupPing failed: " + Log.getStackTraceString(e));
+            return false;
+        } finally {
+            if (conn != null) {
+                try {
+                    conn.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private void forceNetworkWarmup(Runnable onReady, Runnable onFailed) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                if (onFailed != null) onFailed.run();
+                return;
+            }
+
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+
+            ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    CustomExceptionHandler.log(CallMonitorService.this, "Warmup: network available");
+                    new Thread(() -> {
+                        boolean ok = warmupPing();
+                        try {
+                            cm.unregisterNetworkCallback(this);
+                        } catch (Exception ignored) {
+                        }
+                        if (ok) {
+                            CustomExceptionHandler.log(CallMonitorService.this, "Warmup SUCCESS");
+                            if (onReady != null) onReady.run();
+                        } else {
+                            CustomExceptionHandler.log(CallMonitorService.this, "Warmup FAILED");
+                            if (onFailed != null) onFailed.run();
+                        }
+                    }).start();
+                }
+
+                @Override
+                public void onUnavailable() {
+                    CustomExceptionHandler.log(CallMonitorService.this, "Warmup: network unavailable");
+                    try {
+                        cm.unregisterNetworkCallback(this);
+                    } catch (Exception ignored) {
+                    }
+                    if (onFailed != null) onFailed.run();
+                }
+            };
+
+            cm.requestNetwork(request, callback, 20000);
+        } catch (Exception e) {
+            CustomExceptionHandler.log(this, "forceNetworkWarmup failed: " + Log.getStackTraceString(e));
+            if (onFailed != null) onFailed.run();
         }
     }
 
