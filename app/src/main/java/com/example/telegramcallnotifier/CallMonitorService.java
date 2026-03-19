@@ -35,6 +35,7 @@ import androidx.core.app.NotificationCompat;
 
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -71,6 +72,9 @@ public class CallMonitorService extends Service {
     private BroadcastReceiver connectivityReceiver;
     private volatile boolean retryInProgress = false;
     private final Handler retryHandler = new Handler(Looper.getMainLooper());
+    private ConnectivityManager.NetworkCallback beastNetworkCallback;
+    private Network beastNetwork;
+    private WifiManager.WifiLock wifiLock;
     private final Runnable retryRunnable = new Runnable() {
         @Override
         public void run() {
@@ -413,34 +417,286 @@ public class CallMonitorService extends Service {
         new Thread(() -> {
             try {
                 String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
-                triggerFullWake(finalType);
+                triggerBeastMode(finalType);
 
-                forceNetworkWarmup(
+                acquireValidatedNetwork(
                         () -> {
-                            CustomExceptionHandler.log(CallMonitorService.this, "Network READY -> sending type=" + finalType);
-                            boolean ok = telegramSender.sendToServerSync(finalType, text);
+                            logToFile("Validated network READY -> start beast warmup");
+                            boolean ok = strongLockedWarmup();
                             if (ok) {
-                                CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage sent ok type=" + finalType);
+                                logToFile("Beast warmup ready -> sending real message");
+                                boolean sent = telegramSender.sendToServerSync(finalType, text);
+                                if (sent) {
+                                    logToFile("sendGuaranteedMessage sent ok type=" + finalType);
+                                } else {
+                                    String id = finalType + "_" + System.currentTimeMillis();
+                                    PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
+                                    logToFile("Real send failed -> pending saved id=" + id);
+                                }
                             } else {
                                 String id = finalType + "_" + System.currentTimeMillis();
                                 PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
-                                CustomExceptionHandler.log(CallMonitorService.this, "Send failed -> saved pending id=" + id);
+                                logToFile("Beast warmup failed -> pending saved id=" + id);
                             }
                         },
                         () -> {
-                            String id = ((type == null || type.isEmpty()) ? "unknown" : type) + "_" + System.currentTimeMillis();
-                            PendingNotificationManager.addPending(CallMonitorService.this, id, (type == null || type.isEmpty()) ? "unknown" : type, text);
-                            CustomExceptionHandler.log(CallMonitorService.this, "Warmup failed -> saved pending id=" + id);
+                            String id = finalType + "_" + System.currentTimeMillis();
+                            PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
+                            logToFile("Validated network unavailable -> pending saved id=" + id);
                         }
                 );
             } catch (Exception e) {
                 String finalType = (type == null || type.isEmpty()) ? "unknown" : type;
                 String id = finalType + "_" + System.currentTimeMillis();
                 PendingNotificationManager.addPending(CallMonitorService.this, id, finalType, text);
-                CustomExceptionHandler.log(CallMonitorService.this, "sendGuaranteedMessage exception: " + Log.getStackTraceString(e));
+                logToFile("sendGuaranteedMessage BEAST exception: " + Log.getStackTraceString(e));
                 CustomExceptionHandler.logError(CallMonitorService.this, e);
             }
         }).start();
+    }
+
+    private void logToFile(String message) {
+        CustomExceptionHandler.log(this, message);
+    }
+
+    private void triggerBeastMode(String reason) {
+        try {
+            logToFile("BEAST MODE START: " + reason);
+            triggerFullWake(reason);
+            toggleNetworkBoost();
+            acquireWifiLockIfNeeded();
+        } catch (Exception e) {
+            logToFile("BEAST MODE ERROR: " + Log.getStackTraceString(e));
+        }
+    }
+
+    private void toggleNetworkBoost() {
+        try {
+            logToFile("Radio Boost: triggering network activity");
+            InetAddress.getByName("google.com");
+            new Thread(() -> {
+                try {
+                    URL url = new URL("https://www.google.com/generate_204");
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setConnectTimeout(5000);
+                    conn.setReadTimeout(5000);
+                    conn.getResponseCode();
+                    conn.disconnect();
+                    logToFile("Radio Boost: HTTP success");
+                } catch (Exception e) {
+                    logToFile("Radio Boost failed: " + e.getMessage());
+                }
+            }).start();
+        } catch (Exception e) {
+            logToFile("Radio Boost error: " + e.getMessage());
+        }
+    }
+
+    private void acquireWifiLockIfNeeded() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+
+            Network active = cm.getActiveNetwork();
+            if (active == null) return;
+
+            NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+            if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return;
+
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wm == null) return;
+
+            if (wifiLock == null) {
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "TelegramCallNotifier:WifiLock");
+                wifiLock.setReferenceCounted(false);
+            }
+
+            if (!wifiLock.isHeld()) {
+                wifiLock.acquire();
+                logToFile("WifiLock acquired");
+            }
+        } catch (Exception e) {
+            logToFile("WifiLock acquire failed: " + Log.getStackTraceString(e));
+        }
+    }
+
+    private void releaseWifiLock() {
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+                logToFile("WifiLock released");
+            }
+        } catch (Exception e) {
+            logToFile("WifiLock release failed: " + Log.getStackTraceString(e));
+        }
+    }
+
+    private boolean isValidatedNetwork(Network network) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null || network == null) return false;
+
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            if (caps == null) return false;
+
+            boolean hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            boolean validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+            boolean wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+            boolean mobile = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR);
+
+            logToFile("Network validated check: hasInternet=" + hasInternet
+                    + " validated=" + validated
+                    + " wifi=" + wifi
+                    + " mobile=" + mobile);
+
+            return hasInternet && validated;
+        } catch (Exception e) {
+            logToFile("isValidatedNetwork failed: " + Log.getStackTraceString(e));
+            return false;
+        }
+    }
+
+    private void acquireValidatedNetwork(Runnable onReady, Runnable onFailed) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                logToFile("acquireValidatedNetwork: cm is null");
+                if (onFailed != null) onFailed.run();
+                return;
+            }
+
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+
+            unregisterBeastNetworkCallback();
+
+            beastNetworkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    logToFile("BeastNetwork onAvailable");
+                    beastNetwork = network;
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                    boolean hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+                    boolean validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                    boolean wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+                    boolean mobile = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR);
+
+                    logToFile("BeastNetwork changed: hasInternet=" + hasInternet
+                            + " validated=" + validated
+                            + " wifi=" + wifi
+                            + " mobile=" + mobile);
+
+                    if (hasInternet && validated) {
+                        beastNetwork = network;
+                        try {
+                            cm.unregisterNetworkCallback(this);
+                        } catch (Exception ignored) {
+                        }
+                        beastNetworkCallback = null;
+                        if (onReady != null) onReady.run();
+                    }
+                }
+
+                @Override
+                public void onUnavailable() {
+                    logToFile("BeastNetwork onUnavailable");
+                    try {
+                        cm.unregisterNetworkCallback(this);
+                    } catch (Exception ignored) {
+                    }
+                    beastNetworkCallback = null;
+                    if (onFailed != null) onFailed.run();
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    logToFile("BeastNetwork onLost");
+                }
+            };
+
+            cm.requestNetwork(request, beastNetworkCallback, 20000);
+            logToFile("acquireValidatedNetwork: requestNetwork issued (20s)");
+        } catch (Exception e) {
+            logToFile("acquireValidatedNetwork failed: " + Log.getStackTraceString(e));
+            if (onFailed != null) onFailed.run();
+        }
+    }
+
+    private void unregisterBeastNetworkCallback() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null && beastNetworkCallback != null) {
+                cm.unregisterNetworkCallback(beastNetworkCallback);
+                logToFile("BeastNetwork callback unregistered");
+            }
+        } catch (Exception e) {
+            logToFile("unregisterBeastNetworkCallback failed: " + Log.getStackTraceString(e));
+        } finally {
+            beastNetworkCallback = null;
+        }
+    }
+
+    private boolean warmupPingOverLockedNetwork(Network network) {
+        HttpURLConnection conn = null;
+        try {
+            if (network == null) {
+                logToFile("warmupPingOverLockedNetwork: network is null");
+                return false;
+            }
+
+            URL url = new URL(TelegramSender.getServerUrl());
+            conn = (HttpURLConnection) network.openConnection(url);
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(20000);
+            conn.setReadTimeout(20000);
+            conn.setDoOutput(true);
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+
+            String json = "{"
+                    + "\"api_key\":\"" + "A7f9xP22sKp90ZqLm" + "\","
+                    + "\"type\":\"ping\","
+                    + "\"text\":\"beast_warmup\""
+                    + "}";
+
+            OutputStream os = conn.getOutputStream();
+            os.write(json.getBytes(StandardCharsets.UTF_8));
+            os.flush();
+            os.close();
+
+            int code = conn.getResponseCode();
+            logToFile("warmupPingOverLockedNetwork code=" + code);
+            return code == 200;
+        } catch (Exception e) {
+            logToFile("warmupPingOverLockedNetwork failed: " + Log.getStackTraceString(e));
+            return false;
+        } finally {
+            if (conn != null) {
+                try {
+                    conn.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private boolean strongLockedWarmup() {
+        for (int i = 0; i < 4; i++) {
+            if (isValidatedNetwork(beastNetwork) && warmupPingOverLockedNetwork(beastNetwork)) {
+                logToFile("strongLockedWarmup SUCCESS try=" + (i + 1));
+                return true;
+            }
+            logToFile("strongLockedWarmup retry=" + (i + 1));
+            try {
+                Thread.sleep(3000);
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     private boolean warmupPing() {
@@ -1063,6 +1319,8 @@ public class CallMonitorService extends Service {
         super.onDestroy();
         DebugLogger.log(this, "CallMonitorService", "onDestroy");
         DebugLogger.logState(this, "CallMonitorService", "service destroy");
+        releaseWifiLock();
+        unregisterBeastNetworkCallback();
         
         stopBatteryMonitoring();
         retryHandler.removeCallbacks(retryRunnable);
